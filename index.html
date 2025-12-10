@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>Drippy Pixel Field</title>
+  <title>Dripping Pixel Orb</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <style>
     * { box-sizing: border-box; }
@@ -14,7 +14,8 @@
       overflow: hidden;
       background: #000;
       cursor: crosshair;
-      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont,
+        "Segoe UI", sans-serif;
     }
     canvas {
       display: block;
@@ -27,20 +28,24 @@
       left: 16px;
       bottom: 12px;
       font-size: 11px;
-      color: rgba(255,255,255,0.35);
-      letter-spacing: 0.1em;
+      color: rgba(255,255,255,0.5);
+      letter-spacing: 0.12em;
       text-transform: uppercase;
       pointer-events: none;
       user-select: none;
+      transition: opacity 1.0s ease 3s;
+    }
+    .hint.fade {
+      opacity: 0;
     }
   </style>
 </head>
 <body>
 <canvas id="c"></canvas>
-<div class="hint">Move your mouse to create drippy pixels</div>
+<div class="hint" id="hint">Move your mouse – pixel orb will drip</div>
 
 <script>
-/* ------- Setup ------- */
+/* ========== Canvas setup ========== */
 const canvas = document.getElementById("c");
 const ctx = canvas.getContext("2d");
 
@@ -53,27 +58,27 @@ function resize() {
 window.addEventListener("resize", resize);
 resize();
 
-/* ------- Palette / gradient ------- */
+/* ========== Palette (lava colors) ========== */
 function hexToRgb(hex) {
   hex = hex.replace("#", "");
-  if (hex.length === 3) {
-    hex = hex[0]+hex[0] + hex[1]+hex[1] + hex[2]+hex[2];
-  }
+  if (hex.length === 3) hex = hex[0]+hex[0]+hex[1]+hex[1]+hex[2]+hex[2];
   const num = parseInt(hex, 16);
   return { r:(num>>16)&255, g:(num>>8)&255, b:num&255 };
 }
 
-// Lava-style ramp
 const paletteStops = [
-  "#1a0000",
-  "#4d0505",
-  "#960707",
+  "#100000",
+  "#3b0202",
+  "#7e0505",
   "#ff1f1f",
-  "#ffb347",
+  "#ffb347"
 ].map(hexToRgb);
 
+function lerp(a,b,t){return a+(b-a)*t;}
+function clamp01(x){return x<0?0:x>1?1:x;}
+
 function sampleGradient(t) {
-  t = Math.max(0, Math.min(1, t));
+  t = clamp01(t);
   const n = paletteStops.length;
   const scaled = t * (n - 1);
   const i = Math.floor(scaled);
@@ -81,126 +86,178 @@ function sampleGradient(t) {
   const a = paletteStops[i];
   const b = paletteStops[Math.min(i + 1, n - 1)];
   return {
-    r: Math.round(a.r + (b.r - a.r) * f),
-    g: Math.round(a.g + (b.g - a.g) * f),
-    b: Math.round(a.b + (b.b - a.b) * f),
+    r: Math.round(lerp(a.r, b.r, f)),
+    g: Math.round(lerp(a.g, b.g, f)),
+    b: Math.round(lerp(a.b, b.b, f))
   };
 }
 
-/* ------- Drip field ------- */
+/* ========== Cursor orb + drips ========== */
+const orb = {
+  x: innerWidth / 2,
+  y: innerHeight / 2,
+  radius: 90,      // visual radius in pixels
+  targetX: innerWidth / 2,
+  targetY: innerHeight / 2,
+  smoothing: 0.22, // how much it eases toward the cursor
+  lastMoveTime: performance.now()
+};
 
-// Each drip is a vertical streak that falls & fades
-const drips = [];
-const MAX_DRIPS = 80;
-
-function spawnDrip(nx, ny) {
-  drips.push({
-    x: nx,          // normalized 0..1
-    y0: ny,         // starting y (normalized)
-    start: performance.now(),
-    speed: 0.15 + Math.random() * 0.25,  // normalized units per second
-    radius: 0.06 + Math.random() * 0.04, // horizontal influence radius
-    strength: 0.7 + Math.random() * 0.5, // initial intensity
-  });
-  if (drips.length > MAX_DRIPS) drips.shift();
-}
-
-// mouse → spawn drips
-function handlePointer(e) {
+window.addEventListener("pointermove", e => {
   const rect = canvas.getBoundingClientRect();
-  const x = (e.clientX - rect.left) / rect.width;
-  const y = (e.clientY - rect.top) / rect.height;
-  spawnDrip(x, y);
+  orb.targetX = e.clientX - rect.left;
+  orb.targetY = e.clientY - rect.top;
+  orb.lastMoveTime = performance.now();
+  // fade out hint text after first move
+  const hint = document.getElementById("hint");
+  if (hint && !hint.classList.contains("fade")) {
+    hint.classList.add("fade");
+  }
+});
+
+/* Each drip is a vertical stream anchored under the orb */
+const drips = [];
+const MAX_DRIPS = 60;
+let lastDripSpawn = 0;
+
+function spawnDripSet(time) {
+  const baseY = orb.y + orb.radius * 0.4; // bottom of orb
+  const offsets = [-0.45, -0.18, 0.18, 0.45]; // left, inner-left, inner-right, right
+
+  offsets.forEach((off, idx) => {
+    const x = orb.x + orb.radius * off;
+    drips.push({
+      x,
+      y0: baseY,
+      start: time,
+      speed: 200 + Math.random() * 120, // px per second
+      width: 26 + Math.random() * 18,   // horizontal width
+      strength: 0.9 + Math.random() * 0.6,
+      wobblePhase: Math.random() * Math.PI * 2,
+      wobbleAmp: 10 + Math.random() * 12
+    });
+  });
+
+  while (drips.length > MAX_DRIPS) drips.shift();
 }
-window.addEventListener("pointermove", handlePointer);
 
-/* ------- Field sampling ------- */
+/* ========== Field sampling ========== */
 
-function driftNoise(nx, ny, t) {
-  // simple time-based wobble to break up shapes
-  return Math.sin((nx * 10 + t * 0.0017)) * 0.3 +
-         Math.cos((ny * 14 - t * 0.0013)) * 0.3;
-}
-
-// returns intensity 0..1 at (nx,ny) given all drips
-function dripField(nx, ny, time) {
+// dripping intensity 0..1 at pixel position
+function dripField(x, y, time) {
   let v = 0;
   for (let i = 0; i < drips.length; i++) {
     const d = drips[i];
     const age = (time - d.start) / 1000; // seconds
     if (age < 0) continue;
 
-    const headY = d.y0 + age * d.speed; // current drip head position
-    if (headY - d.radius > 1.2) continue; // off-screen
+    // drifting head with wobble
+    const headY = d.y0 + d.speed * age;
+    if (headY - 30 > canvas.height) continue; // below screen
 
-    const dx = Math.abs(nx - d.x);
-    if (dx > d.radius) continue;
+    // only below the orb base
+    if (y < d.y0 - 15) continue;
 
-    if (ny < d.y0) continue;          // nothing above origin
-    if (ny > headY + 0.25) continue;  // fade after head passes
+    const wobble = Math.sin(age * 3.0 + d.wobblePhase) * d.wobbleAmp;
+    const cx = d.x + wobble;
 
-    const dy = ny - headY; // 0 at head
-    // vertical fall attenuation (negative dy = above head → stronger)
-    const vertical = Math.exp(-Math.max(0, dy + 0.01) * 9);
-    const horizontal = 1 - dx / d.radius;
+    const dx = x - cx;
+    const ax = Math.abs(dx);
+    if (ax > d.width) continue;
+
+    // vertical profile: strongest near head, with a tail
+    const dy = y - headY;
+    if (dy > 90) continue; // too far below
+
+    const vertical = Math.exp(-Math.max(-40, dy) * 0.025);
+    const horizontal = 1.0 - ax / d.width;
     let local = d.strength * vertical * horizontal;
 
-    // older drips fade
-    const lifeFade = Math.exp(-age * 0.8);
+    // overall lifetime fade
+    const lifeFade = Math.exp(-age * 0.9);
     local *= lifeFade;
 
     if (local > v) v = local;
   }
-  return Math.max(0, Math.min(1, v));
+  return clamp01(v);
 }
 
-/* ------- Render loop ------- */
+// orb intensity 0..1 at pixel position
+function orbField(x, y, time) {
+  const dx = x - orb.x;
+  const dy = y - orb.y;
+  const r = Math.sqrt(dx*dx + dy*dy);
+  const core = orb.radius * 0.6;
+  const outer = orb.radius;
+  if (r > outer) return 0;
 
-let lastW = innerWidth;
-let lastH = innerHeight;
-// gridSize = number of "pixels" across the short side
-const BASE_GRID = 90;
+  // soft edge
+  let tVal = 1 - (r - core) / (outer - core);
+  if (r < core) tVal = 1;
+  tVal = clamp01(tVal);
+
+  // subtle breathing so it feels alive
+  const breath = 0.06 * Math.sin(time * 0.0015);
+  tVal = clamp01(tVal + breath);
+
+  return tVal;
+}
+
+/* ========== Render loop ========== */
+const BASE_GRID = 110; // how many blocks on the short side
+
+let lastTime = performance.now();
 
 function render(time) {
+  const dt = (time - lastTime) / 1000;
+  lastTime = time;
+
   const w = innerWidth;
   const h = innerHeight;
-  if (w !== lastW || h !== lastH) {
-    resize();
-    lastW = w; lastH = h;
-  }
-
-  const size = Math.min(w, h);
+  const shortSide = Math.min(w, h);
   const grid = BASE_GRID;
-  const cell = size / grid;
+  const cell = shortSide / grid;
   const cols = Math.ceil(w / cell);
   const rows = Math.ceil(h / cell);
+
+  // smooth orb motion
+  orb.x = lerp(orb.x, orb.targetX, orb.smoothing);
+  orb.y = lerp(orb.y, orb.targetY, orb.smoothing);
 
   ctx.fillStyle = "#000000";
   ctx.fillRect(0, 0, w, h);
 
+  // spawn drips regularly while user has moved recently
+  if (time - orb.lastMoveTime < 2200) { // 2.2s after last move
+    if (time - lastDripSpawn > 120) {   // every 120 ms
+      spawnDripSet(time);
+      lastDripSpawn = time;
+    }
+  }
+
+  // draw pixel grid
   for (let j = 0; j < rows; j++) {
     for (let i = 0; i < cols; i++) {
-      const cx = (i + 0.5) * cell;
-      const cy = (j + 0.5) * cell;
-      const nx = cx / w;
-      const ny = cy / h;
+      const px = (i + 0.5) * cell;
+      const py = (j + 0.5) * cell;
 
-      // core drip intensity
-      let dVal = dripField(nx, ny, time);
+      let vOrb = orbField(px, py, time);
+      let vDrip = dripField(px, py, time);
 
-      if (dVal <= 0.01) continue; // keep pure black where nothing happens
+      // combine: orb dominates near center, drips extend downward
+      let v = Math.max(vOrb, vDrip);
+      if (v <= 0.01) continue; // leave pure black
 
-      // add some wavy motion so it doesn't look static within the drip
-      const wobble = driftNoise(nx, ny, time) * 0.25;
-      let tVal = Math.max(0, Math.min(1, dVal + wobble * dVal));
+      // a little curve so mids pop and noise is smooth
+      v = Math.pow(v, 0.8);
 
-      const col = sampleGradient(tVal);
+      const col = sampleGradient(v);
       ctx.fillStyle = `rgb(${col.r},${col.g},${col.b})`;
       ctx.fillRect(
-        i * cell,
-        j * cell,
-        Math.ceil(cell) + 1,
-        Math.ceil(cell) + 1
+        Math.floor(i * cell),
+        Math.floor(j * cell),
+        Math.ceil(cell)+1,
+        Math.ceil(cell)+1
       );
     }
   }
