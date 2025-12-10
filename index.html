@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>Dripping Pixel Orb</title>
+  <title>Particle Gravity Field</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <style>
     * { box-sizing: border-box; }
@@ -13,9 +13,8 @@
       height: 100%;
       overflow: hidden;
       background: #000;
-      cursor: crosshair;
-      font-family: system-ui, -apple-system, BlinkMacSystemFont,
-        "Segoe UI", sans-serif;
+      cursor: none;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     }
     canvas {
       display: block;
@@ -26,185 +25,128 @@
     .hint {
       position: fixed;
       left: 16px;
-      bottom: 12px;
+      bottom: 14px;
       font-size: 11px;
-      color: rgba(255,255,255,0.5);
+      color: rgba(255,255,255,0.4);
       letter-spacing: 0.12em;
       text-transform: uppercase;
       pointer-events: none;
       user-select: none;
-      transition: opacity 1.0s ease 3s;
+      transition: opacity 1s ease 3s;
     }
-    .hint.fade {
-      opacity: 0;
+    .hint.fade { opacity: 0; }
+
+    .cursor-dot {
+      position: fixed;
+      width: 10px;
+      height: 10px;
+      border-radius: 999px;
+      pointer-events: none;
+      transform: translate(-50%, -50%);
+      background: radial-gradient(circle at 30% 30%, #ffffff, #60a5ff, transparent 70%);
+      mix-blend-mode: screen;
+      filter: blur(0.5px);
+      z-index: 10;
     }
   </style>
 </head>
 <body>
 <canvas id="c"></canvas>
-<div class="hint" id="hint">Move your mouse – pixel orb will drip</div>
+<div class="cursor-dot" id="cursorDot"></div>
+<div class="hint" id="hint">Move your mouse – particles will bend toward it</div>
 
 <script>
-/* ========== Canvas setup ========== */
+/* ================= Canvas setup ================= */
 const canvas = document.getElementById("c");
 const ctx = canvas.getContext("2d");
 
-function resize() {
+function resizeCanvas() {
   const dpr = window.devicePixelRatio || 1;
   canvas.width  = innerWidth  * dpr;
   canvas.height = innerHeight * dpr;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0); // draw in CSS pixels
 }
-window.addEventListener("resize", resize);
-resize();
+window.addEventListener("resize", resizeCanvas);
+resizeCanvas();
 
-/* ========== Palette (lava colors) ========== */
-function hexToRgb(hex) {
-  hex = hex.replace("#", "");
-  if (hex.length === 3) hex = hex[0]+hex[0]+hex[1]+hex[1]+hex[2]+hex[2];
-  const num = parseInt(hex, 16);
-  return { r:(num>>16)&255, g:(num>>8)&255, b:num&255 };
-}
+/* ================= Particle system ================= */
 
-const paletteStops = [
-  "#100000",
-  "#3b0202",
-  "#7e0505",
-  "#ff1f1f",
-  "#ffb347"
-].map(hexToRgb);
+// Configuration
+const PARTICLE_COUNT = 1000;
+const HOME_FORCE     = 0.05;   // how strongly particles are pulled back to their home
+const FRICTION       = 0.86;   // velocity damping
+const GRAVITY_STRENGTH = 9000; // pull toward cursor
+const INFLUENCE_RADIUS = 220;  // pixels around cursor
+const MIN_DISTANCE     = 18;   // avoid exploding when cursor is too close
+const PARTICLE_SIZE    = 2.0;  // base size in pixels
 
-function lerp(a,b,t){return a+(b-a)*t;}
-function clamp01(x){return x<0?0:x>1?1:x;}
+let particles = [];
 
-function sampleGradient(t) {
-  t = clamp01(t);
-  const n = paletteStops.length;
-  const scaled = t * (n - 1);
-  const i = Math.floor(scaled);
-  const f = scaled - i;
-  const a = paletteStops[i];
-  const b = paletteStops[Math.min(i + 1, n - 1)];
-  return {
-    r: Math.round(lerp(a.r, b.r, f)),
-    g: Math.round(lerp(a.g, b.g, f)),
-    b: Math.round(lerp(a.b, b.b, f))
-  };
-}
-
-/* ========== Cursor orb + drips ========== */
-const orb = {
+// track mouse
+const mouse = {
   x: innerWidth / 2,
   y: innerHeight / 2,
-  radius: 90,      // visual radius in pixels
-  targetX: innerWidth / 2,
-  targetY: innerHeight / 2,
-  smoothing: 0.22, // how much it eases toward the cursor
-  lastMoveTime: performance.now()
+  isActive: false
 };
 
-window.addEventListener("pointermove", e => {
+window.addEventListener("pointermove", (e) => {
   const rect = canvas.getBoundingClientRect();
-  orb.targetX = e.clientX - rect.left;
-  orb.targetY = e.clientY - rect.top;
-  orb.lastMoveTime = performance.now();
-  // fade out hint text after first move
+  mouse.x = e.clientX - rect.left;
+  mouse.y = e.clientY - rect.top;
+  mouse.isActive = true;
+
+  const dot = document.getElementById("cursorDot");
+  dot.style.left = e.clientX + "px";
+  dot.style.top  = e.clientY + "px";
+
   const hint = document.getElementById("hint");
   if (hint && !hint.classList.contains("fade")) {
     hint.classList.add("fade");
   }
 });
 
-/* Each drip is a vertical stream anchored under the orb */
-const drips = [];
-const MAX_DRIPS = 60;
-let lastDripSpawn = 0;
+window.addEventListener("pointerleave", () => {
+  mouse.isActive = false;
+});
 
-function spawnDripSet(time) {
-  const baseY = orb.y + orb.radius * 0.4; // bottom of orb
-  const offsets = [-0.45, -0.18, 0.18, 0.45]; // left, inner-left, inner-right, right
+// Initialize particles in a loose grid, so it looks “composed”
+function initParticles() {
+  particles = [];
+  const cols = Math.round(Math.sqrt(PARTICLE_COUNT) * (innerWidth / innerHeight) || 1);
+  const rows = Math.round(PARTICLE_COUNT / cols);
 
-  offsets.forEach((off, idx) => {
-    const x = orb.x + orb.radius * off;
-    drips.push({
-      x,
-      y0: baseY,
-      start: time,
-      speed: 200 + Math.random() * 120, // px per second
-      width: 26 + Math.random() * 18,   // horizontal width
-      strength: 0.9 + Math.random() * 0.6,
-      wobblePhase: Math.random() * Math.PI * 2,
-      wobbleAmp: 10 + Math.random() * 12
-    });
-  });
+  const margin = 80;
+  const usableW = innerWidth - margin * 2;
+  const usableH = innerHeight - margin * 2;
 
-  while (drips.length > MAX_DRIPS) drips.shift();
-}
+  for (let j = 0; j < rows; j++) {
+    for (let i = 0; i < cols; i++) {
+      if (particles.length >= PARTICLE_COUNT) break;
 
-/* ========== Field sampling ========== */
+      const fx = (i + 0.5) / cols;
+      const fy = (j + 0.5) / rows;
+      const homeX = margin + fx * usableW + (Math.random() - 0.5) * 8;
+      const homeY = margin + fy * usableH + (Math.random() - 0.5) * 8;
 
-// dripping intensity 0..1 at pixel position
-function dripField(x, y, time) {
-  let v = 0;
-  for (let i = 0; i < drips.length; i++) {
-    const d = drips[i];
-    const age = (time - d.start) / 1000; // seconds
-    if (age < 0) continue;
-
-    // drifting head with wobble
-    const headY = d.y0 + d.speed * age;
-    if (headY - 30 > canvas.height) continue; // below screen
-
-    // only below the orb base
-    if (y < d.y0 - 15) continue;
-
-    const wobble = Math.sin(age * 3.0 + d.wobblePhase) * d.wobbleAmp;
-    const cx = d.x + wobble;
-
-    const dx = x - cx;
-    const ax = Math.abs(dx);
-    if (ax > d.width) continue;
-
-    // vertical profile: strongest near head, with a tail
-    const dy = y - headY;
-    if (dy > 90) continue; // too far below
-
-    const vertical = Math.exp(-Math.max(-40, dy) * 0.025);
-    const horizontal = 1.0 - ax / d.width;
-    let local = d.strength * vertical * horizontal;
-
-    // overall lifetime fade
-    const lifeFade = Math.exp(-age * 0.9);
-    local *= lifeFade;
-
-    if (local > v) v = local;
+      particles.push({
+        x: homeX,
+        y: homeY,
+        vx: 0,
+        vy: 0,
+        hx: homeX,
+        hy: homeY,
+        jitterPhase: Math.random() * Math.PI * 2,
+        jitterSpeed: 0.5 + Math.random() * 0.8,
+        brightness: 0.4 + Math.random() * 0.6
+      });
+    }
   }
-  return clamp01(v);
 }
 
-// orb intensity 0..1 at pixel position
-function orbField(x, y, time) {
-  const dx = x - orb.x;
-  const dy = y - orb.y;
-  const r = Math.sqrt(dx*dx + dy*dy);
-  const core = orb.radius * 0.6;
-  const outer = orb.radius;
-  if (r > outer) return 0;
+initParticles();
+window.addEventListener("resize", initParticles);
 
-  // soft edge
-  let tVal = 1 - (r - core) / (outer - core);
-  if (r < core) tVal = 1;
-  tVal = clamp01(tVal);
-
-  // subtle breathing so it feels alive
-  const breath = 0.06 * Math.sin(time * 0.0015);
-  tVal = clamp01(tVal + breath);
-
-  return tVal;
-}
-
-/* ========== Render loop ========== */
-const BASE_GRID = 110; // how many blocks on the short side
+/* ================= Animation loop ================= */
 
 let lastTime = performance.now();
 
@@ -214,57 +156,89 @@ function render(time) {
 
   const w = innerWidth;
   const h = innerHeight;
-  const shortSide = Math.min(w, h);
-  const grid = BASE_GRID;
-  const cell = shortSide / grid;
-  const cols = Math.ceil(w / cell);
-  const rows = Math.ceil(h / cell);
 
-  // smooth orb motion
-  orb.x = lerp(orb.x, orb.targetX, orb.smoothing);
-  orb.y = lerp(orb.y, orb.targetY, orb.smoothing);
-
-  ctx.fillStyle = "#000000";
+  // trailing clear for nice motion blur
+  ctx.fillStyle = "rgba(0,0,0,0.25)";
   ctx.fillRect(0, 0, w, h);
 
-  // spawn drips regularly while user has moved recently
-  if (time - orb.lastMoveTime < 2200) { // 2.2s after last move
-    if (time - lastDripSpawn > 120) {   // every 120 ms
-      spawnDripSet(time);
-      lastDripSpawn = time;
+  const radius2 = INFLUENCE_RADIUS * INFLUENCE_RADIUS;
+
+  for (let i = 0; i < particles.length; i++) {
+    const p = particles[i];
+
+    // soft "breathing" jitter even when idle
+    const jPhase = p.jitterPhase + time * 0.001 * p.jitterSpeed;
+    const jx = Math.cos(jPhase) * 0.4;
+    const jy = Math.sin(jPhase * 0.9) * 0.4;
+
+    // Pull back to home
+    let dxHome = p.hx - p.x;
+    let dyHome = p.hy - p.y;
+    p.vx += dxHome * HOME_FORCE * dt;
+    p.vy += dyHome * HOME_FORCE * dt;
+
+    // Cursor gravity
+    if (mouse.isActive) {
+      const dx = mouse.x - p.x;
+      const dy = mouse.y - p.y;
+      const dist2 = dx * dx + dy * dy;
+      if (dist2 < radius2 && dist2 > MIN_DISTANCE * MIN_DISTANCE) {
+        const dist = Math.sqrt(dist2);
+        // force decays with distance, stronger when closer
+        const force = (GRAVITY_STRENGTH * dt) / (dist2 + 40);
+        const fx = (dx / dist) * force;
+        const fy = (dy / dist) * force;
+        p.vx += fx;
+        p.vy += fy;
+      }
     }
-  }
 
-  // draw pixel grid
-  for (let j = 0; j < rows; j++) {
-    for (let i = 0; i < cols; i++) {
-      const px = (i + 0.5) * cell;
-      const py = (j + 0.5) * cell;
+    // apply small jitter
+    p.vx += jx * 0.02;
+    p.vy += jy * 0.02;
 
-      let vOrb = orbField(px, py, time);
-      let vDrip = dripField(px, py, time);
+    // friction
+    p.vx *= FRICTION;
+    p.vy *= FRICTION;
 
-      // combine: orb dominates near center, drips extend downward
-      let v = Math.max(vOrb, vDrip);
-      if (v <= 0.01) continue; // leave pure black
+    // integrate
+    p.x += p.vx;
+    p.y += p.vy;
 
-      // a little curve so mids pop and noise is smooth
-      v = Math.pow(v, 0.8);
+    // draw
+    const vMag = Math.sqrt(p.vx * p.vx + p.vy * p.vy);
+    const speedFactor = Math.min(vMag * 4.0, 1.0);
+    const glow = p.brightness * (0.5 + speedFactor * 0.7);
 
-      const col = sampleGradient(v);
-      ctx.fillStyle = `rgb(${col.r},${col.g},${col.b})`;
-      ctx.fillRect(
-        Math.floor(i * cell),
-        Math.floor(j * cell),
-        Math.ceil(cell)+1,
-        Math.ceil(cell)+1
-      );
-    }
+    const col = mixColor(glow);
+    ctx.fillStyle = col;
+
+    const size = PARTICLE_SIZE + speedFactor * 2.0;
+    // draw small square pixel particles
+    ctx.fillRect(
+      p.x - size * 0.5,
+      p.y - size * 0.5,
+      size,
+      size
+    );
   }
 
   requestAnimationFrame(render);
 }
 requestAnimationFrame(render);
+
+/* ================= Color helper ================= */
+
+// Map brightness 0..1 into subtle cyan/blue/white ramp
+function mixColor(t) {
+  t = clamp01(t);
+  const c1 = { r: 120, g: 180, b: 255 }; // soft cyan
+  const c2 = { r: 200, g: 220, b: 255 }; // pale white-blue
+  const r = Math.round(c1.r + (c2.r - c1.r) * t);
+  const g = Math.round(c1.g + (c2.g - c1.g) * t);
+  const b = Math.round(c1.b + (c2.b - c1.b) * t);
+  return `rgb(${r},${g},${b})`;
+}
 </script>
 </body>
 </html>
